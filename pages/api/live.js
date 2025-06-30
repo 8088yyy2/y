@@ -11,51 +11,47 @@ export default async function handler(req, res) {
   if (!id) return res.status(400).json({ error: "Missing 'id' parameter." });
   const cleanId = id.replace(/^@/, '');
   const liveUrl = `https://www.youtube.com/@${cleanId}/live`;
+  console.log('Live page URL:', liveUrl);
 
   let browser = null;
   try {
     browser = await puppeteer.launch({
       args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath,
       headless: chromium.headless,
     });
     const page = await browser.newPage();
+
+    console.log('Navigating to live URL...');
     await page.goto(liveUrl, { waitUntil: 'networkidle2' });
 
-    const ytUrl = await page.evaluate(() => {
-      const link = document.querySelector('a.yt-simple-endpoint.style-scope.yt-live-chat-renderer');
-      if (link?.href) return link.href;
-      const canonical = document.querySelector('link[rel="canonical"]');
-      if (canonical?.href) return canonical.href;
-      return null;
-    });
+    const canonical = await page.$eval('link[rel="canonical"]', el => el.href).catch(() => null);
+    console.log('Canonical URL found:', canonical);
 
-    if (!ytUrl?.includes('youtube.com/watch?v=')) {
-      return res.status(404).json({
-        status: 'offline',
-        message: 'No live video found (channel likely offline or blocked).'
-      });
+    if (!canonical || !canonical.includes('/watch?v=')) {
+      return res.status(200).json({ status: 'offline', canonical });
     }
 
-    await page.goto(ytUrl, { waitUntil: 'networkidle2' });
-    const hlsUrl = await page.evaluate(() => {
-      const text = document.documentElement.innerHTML;
-      const m = /"hlsManifestUrl":"([^"]+\.m3u8)"/.exec(text);
-      return m ? m[1].replace(/\\u0026/g, '&').replace(/\\/g, '') : null;
-    });
+    console.log('Going to video page:', canonical);
+    await page.goto(canonical, { waitUntil: 'networkidle2' });
 
-    if (!hlsUrl) {
-      return res.status(404).json({
-        status: 'error',
-        message: 'HLS manifest not found'
-      });
+    const rawHtml = await page.content();
+    console.log('Fetched video page HTML length:', rawHtml.length);
+
+    const hlsMatch = rawHtml.match(/"hlsManifestUrl":"([^"]+\.m3u8)"/);
+    console.log('HLS match object:', hlsMatch);
+
+    if (!hlsMatch || !hlsMatch[1]) {
+      return res.status(200).json({ status: 'error', message: 'No HLS URL', hlsMatch: !!hlsMatch });
     }
+
+    const hlsUrl = hlsMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
+    console.log('Extracted HLS URL:', hlsUrl);
 
     return res.redirect(302, hlsUrl);
 
   } catch (e) {
-    console.error('Error fetching live:', e);
+    console.error('Error in handler:', e);
     return res.status(500).json({ error: 'Internal error', details: e.message });
   } finally {
     if (browser) await browser.close();
